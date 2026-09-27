@@ -206,17 +206,19 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
         const url = tile.tileID.canonical.url(this.tiles, this.map.getPixelRatio(), this.scheme);
         const premultiply = this._premultiplyAlpha;
         const imageBitmapOptions = premultiply ? undefined : {premultiplyAlpha: 'none'} as const;
-        tile.abortController = new AbortController();
+        tile.abortController?.abort();
+        const abortController = new AbortController();
+        tile.abortController = abortController;
         try {
             const response = await ImageRequest.transformAndGetImage(
                 this.map._requestManager,
                 url,
                 ResourceType.Tile,
-                tile.abortController,
+                abortController,
                 this.map._refreshExpiredTiles,
                 imageBitmapOptions
             );
-            delete tile.abortController;
+            if (this._isRequestSuperseded(tile, abortController)) return;
             if (tile.aborted) {
                 tile.state = 'unloaded';
                 return;
@@ -241,14 +243,21 @@ export class RasterTileSource extends Evented<SourceEventType> implements Source
                 tile.state = 'loaded';
             }
         } catch (err) {
-            delete tile.abortController;
+            if (this._isRequestSuperseded(tile, abortController)) return;
             if (tile.aborted) {
                 tile.state = 'unloaded';
             } else if (err) {
                 tile.state = 'errored';
                 throw err;
             }
+        } finally {
+            if (tile.abortController === abortController) delete tile.abortController;
         }
+    }
+
+    /** Whether a later `loadTile` for the same tile has aborted the request that `abortController` belongs to. */
+    _isRequestSuperseded(tile: Tile, abortController: AbortController): boolean {
+        return abortController.signal.aborted && !tile.aborted;
     }
 
     async abortTile(tile: Tile): Promise<void> {

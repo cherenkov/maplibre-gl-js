@@ -276,6 +276,48 @@ describe('RasterTileSource', () => {
         expect(transformSpy.mock.calls[0][0]).toBe('http://example2.com/10/5/5.png');
     });
 
+    test('setTiles during a tile load aborts the old request and loads the tile from the new URL', async () => {
+        const source = createSource({tiles: ['http://example.com/{z}/{x}/{y}.png']});
+        source.map.painter = {context: {}, getTileTexture: () => ({update: () => {}})} as any;
+        await waitForEvent(source, 'data', (e: MapSourceDataEvent) => e.sourceDataType === 'metadata');
+        const tile = {
+            tileID: new OverscaledTileID(10, 0, 10, 5, 5),
+            state: 'loading',
+            setExpiryData() {}
+        } as any as Tile;
+
+        const oldLoad = source.loadTile(tile);
+        await sleep(0);
+        source.setTiles(['http://example2.com/{z}/{x}/{y}.png']);
+        const newLoad = source.loadTile(tile);
+        await sleep(0);
+        server.requests[1].respond(200, {'Content-Type': 'image/png', 'Content-Length': '1'}, '0');
+        await Promise.all([oldLoad, newLoad]);
+
+        expect(server.requests[0].aborted).toBe(true);
+        expect(server.requests[1].url).toBe('http://example2.com/10/5/5.png');
+        expect(tile.state).toBe('loaded');
+    });
+
+    test('a response that arrives just before the tile is reloaded does not mark the tile loaded', async () => {
+        const source = createSource({tiles: ['http://example.com/{z}/{x}/{y}.png']});
+        source.map.painter = {context: {}, getTileTexture: () => ({update: () => {}})} as any;
+        await waitForEvent(source, 'data', (e: MapSourceDataEvent) => e.sourceDataType === 'metadata');
+        const tile = {
+            tileID: new OverscaledTileID(10, 0, 10, 5, 5),
+            state: 'loading',
+            setExpiryData() {}
+        } as any as Tile;
+
+        const oldLoad = source.loadTile(tile);
+        await sleep(0);
+        server.requests[0].respond(200, {'Content-Type': 'image/png', 'Content-Length': '1'}, '0');
+        source.loadTile(tile);
+        await oldLoad;
+
+        expect(tile.state).toBe('loading');
+    });
+
     test('cancels TileJSON request if removed', async () => {
         const source = createSource({url: '/source.json'});
         await sleep(0);

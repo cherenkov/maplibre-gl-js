@@ -403,6 +403,81 @@ describe('RasterDEMTileSource', () => {
         expect(tile.state).toBe('unloaded');
     });
 
+    test('setTiles during a tile load aborts the old request and loads the tile from the new URL', async () => {
+        const source = createSource({tiles: ['http://example.com/{z}/{x}/{y}.png']});
+        await waitForMetadataEvent(source);
+        const tile = {
+            tileID: new OverscaledTileID(5, 0, 5, 31, 5),
+            state: 'loading',
+            actor: source.dispatcher.getReadyActor(),
+            setExpiryData() {}
+        } as any as Tile;
+
+        const oldLoad = source.loadTile(tile);
+        await sleep(0);
+        source.setTiles(['http://example2.com/{z}/{x}/{y}.png']);
+        tile.state = 'reloading';
+        const newLoad = source.loadTile(tile);
+        await sleep(0);
+        server.requests[1].respond(200, {'Content-Type': 'image/png', 'Content-Length': '1'}, '0');
+        await Promise.all([oldLoad, newLoad]);
+
+        expect(server.requests[0].aborted).toBe(true);
+        expect(server.requests[1].url).toBe('http://example2.com/5/31/5.png');
+        expect(tile.state).toBe('loaded');
+    });
+
+    test('a late DEM from a replaced request does not overwrite the tile', async () => {
+        server.respondWith('http://example.com/10/5/5.png', [200, {'Content-Type': 'image/png', 'Content-Length': '1'}, '0']);
+        const source = createSource({tiles: ['http://example.com/{z}/{x}/{y}.png']});
+        await waitForMetadataEvent(source);
+        const respond: Array<(dem: string) => void> = [];
+        const tile = {
+            tileID: new OverscaledTileID(10, 0, 10, 5, 5),
+            state: 'reloading',
+            setExpiryData() {},
+            actor: {sendAsync: () => new Promise(resolve => respond.push(resolve))}
+        } as any as Tile;
+
+        const oldLoad = source.loadTile(tile);
+        await sleep(0);
+        server.respond();
+        await vi.waitFor(() => expect(respond).toHaveLength(1));
+        const newLoad = source.loadTile(tile);
+        await sleep(0);
+        server.respond();
+        await vi.waitFor(() => expect(respond).toHaveLength(2));
+        respond[1]('new DEM');
+        await newLoad;
+        respond[0]('old DEM');
+        await oldLoad;
+
+        expect(tile.dem).toBe('new DEM');
+        expect(tile.state).toBe('loaded');
+    });
+
+    test('an empty response that arrives just before the tile is reloaded does not stop the new request from loading the DEM', async () => {
+        const source = createSource({tiles: ['http://example.com/{z}/{x}/{y}.png']});
+        await waitForMetadataEvent(source);
+        const tile = {
+            tileID: new OverscaledTileID(10, 0, 10, 5, 5),
+            state: 'reloading',
+            setExpiryData() {},
+            actor: {sendAsync: async () => 'new DEM'}
+        } as any as Tile;
+
+        const oldLoad = source.loadTile(tile);
+        await sleep(0);
+        server.requests[0].respond(200, {'Content-Type': 'image/png'}, '');
+        const newLoad = source.loadTile(tile);
+        await oldLoad;
+        await sleep(0);
+        server.requests[1].respond(200, {'Content-Type': 'image/png', 'Content-Length': '1'}, '0');
+        await newLoad;
+
+        expect(tile.dem).toBe('new DEM');
+    });
+
     test('reloads tile in reloading state', async () => {
         server.respondWith('/source.json', JSON.stringify({
             minzoom: 0,

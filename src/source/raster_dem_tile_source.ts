@@ -56,10 +56,12 @@ export class RasterDEMTileSource extends RasterTileSource implements Source {
     override async loadTile(tile: Tile): Promise<void> {
         const url = tile.tileID.canonical.url(this.tiles, this.map.getPixelRatio(), this.scheme);
         tile.neighboringTiles = this._getNeighboringTiles(tile.tileID);
-        tile.abortController = new AbortController();
+        tile.abortController?.abort();
+        const abortController = new AbortController();
+        tile.abortController = abortController;
         try {
-            const response = await ImageRequest.transformAndGetImage(this.map._requestManager, url, ResourceType.Tile, tile.abortController, this.map._refreshExpiredTiles, {colorSpaceConversion: 'none'});
-            delete tile.abortController;
+            const response = await ImageRequest.transformAndGetImage(this.map._requestManager, url, ResourceType.Tile, abortController, this.map._refreshExpiredTiles, {colorSpaceConversion: 'none'});
+            if (this._isRequestSuperseded(tile, abortController)) return;
             if (tile.aborted) {
                 tile.state = 'unloaded';
                 return;
@@ -97,20 +99,24 @@ export class RasterDEMTileSource extends RasterTileSource implements Source {
                 if (!tile.actor || tile.state === 'expired') {
                     tile.actor = this.dispatcher.getReadyActor();
                 }
-                tile.dem = await tile.actor.sendAsync({type: MessageType.loadDEMTile, data: params});
+                const dem = await tile.actor.sendAsync({type: MessageType.loadDEMTile, data: params}, abortController);
+                if (this._isRequestSuperseded(tile, abortController)) return;
+                tile.dem = dem;
                 tile.needsHillshadePrepare = true;
                 tile.needsTerrainPrepare = true;
                 tile.needsColorReliefPrepare = true;
                 tile.state = 'loaded';
             }
         } catch (err) {
-            delete tile.abortController;
+            if (this._isRequestSuperseded(tile, abortController)) return;
             if (tile.aborted) {
                 tile.state = 'unloaded';
             } else if (err) {
                 tile.state = 'errored';
                 throw err;
             }
+        } finally {
+            if (tile.abortController === abortController) delete tile.abortController;
         }
     }
 
