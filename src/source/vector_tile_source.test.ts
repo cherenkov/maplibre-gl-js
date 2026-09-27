@@ -12,7 +12,7 @@ import {SubdivisionGranularitySetting} from '../render/subdivision_granularity_s
 import {type ActorMessage, MessageType} from '../util/actor_messages.ts';
 
 import type {Map} from '../ui/map.ts';
-import type {WorkerTileParameters} from './worker_source.ts';
+import type {WorkerTileParameters, WorkerTileResult} from './worker_source.ts';
 import type {Tile} from '../tile/tile.ts';
 import type {Source} from './source.ts';
 import type {MapSourceDataEvent} from '../ui/events.ts';
@@ -591,6 +591,72 @@ describe('VectorTileSource', () => {
 
         await expect(source.loadTile(tile)).resolves.toBeUndefined();
         expect(tile.loadVectorData).toHaveBeenCalledTimes(0);
+    });
+
+    test('reloading an expired tile aborts the previous request and ignores its response', async () => {
+        const source = createSource({
+            tiles: ['http://example.com/{z}/{x}/{y}.png']
+        });
+        await waitForMetadataEvent(source);
+        const requests: Array<{abortController: AbortController; respond: (data: WorkerTileResult) => void}> = [];
+        source.dispatcher = getWrapDispatcher()({
+            sendAsync(_message, abortController) {
+                return new Promise(resolve => requests.push({abortController, respond: resolve}));
+            }
+        });
+        const tile = {
+            tileID: new OverscaledTileID(10, 0, 10, 5, 5),
+            state: 'expired',
+            loadVectorData: vi.fn(),
+            setExpiryData() {}
+        } as any as Tile;
+
+        const oldLoad = source.loadTile(tile);
+        await vi.waitFor(() => expect(requests).toHaveLength(1));
+        const newLoad = source.loadTile(tile);
+        await vi.waitFor(() => expect(requests).toHaveLength(2));
+        requests[0].respond({etag: 'old'} as WorkerTileResult);
+        await oldLoad;
+
+        expect(requests[0].abortController.signal.aborted).toBe(true);
+        expect(tile.abortController).toBe(requests[1].abortController);
+
+        requests[1].respond({etag: 'new'} as WorkerTileResult);
+        await newLoad;
+
+        expect(tile.loadVectorData).toHaveBeenCalledTimes(1);
+        expect(tile.etag).toBe('new');
+    });
+
+    test('reparsing a loaded tile keeps its earlier reparse, so every result is shown', async () => {
+        const source = createSource({
+            tiles: ['http://example.com/{z}/{x}/{y}.png']
+        });
+        await waitForMetadataEvent(source);
+        const requests: Array<{abortController: AbortController; respond: (data: WorkerTileResult) => void}> = [];
+        const actor = {
+            sendAsync(_message, abortController) {
+                return new Promise(resolve => requests.push({abortController, respond: resolve}));
+            }
+        };
+        const tile = {
+            tileID: new OverscaledTileID(10, 0, 10, 5, 5),
+            state: 'reloading',
+            actor,
+            loadVectorData: vi.fn(),
+            setExpiryData() {}
+        } as any as Tile;
+
+        const firstReload = source.loadTile(tile);
+        await vi.waitFor(() => expect(requests).toHaveLength(1));
+        const secondReload = source.loadTile(tile);
+        await vi.waitFor(() => expect(requests).toHaveLength(2));
+        requests[0].respond({etag: 'first'} as WorkerTileResult);
+        requests[1].respond({etag: 'second'} as WorkerTileResult);
+        await Promise.all([firstReload, secondReload]);
+
+        expect(requests[0].abortController.signal.aborted).toBe(false);
+        expect(tile.loadVectorData).toHaveBeenCalledTimes(2);
     });
 
     test('stores worker etag on tile when present', async () => {

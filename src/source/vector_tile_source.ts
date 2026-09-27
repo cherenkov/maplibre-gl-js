@@ -234,12 +234,12 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
                 tile.reloadPromise = {resolve, reject};
             });
         }
-        tile.abortController = new AbortController();
+        if (messageType === MessageType.loadTile) tile.abortController?.abort();
+        const abortController = new AbortController();
+        tile.abortController = abortController;
         try {
-            const data = await tile.actor.sendAsync({type: messageType, data: params}, tile.abortController);
-            delete tile.abortController;
-
-            if (tile.aborted) {
+            const data = await tile.actor.sendAsync({type: messageType, data: params}, abortController);
+            if (tile.aborted || abortController.signal.aborted) {
                 return;
             }
             this._afterTileLoadWorkerResponse(tile, data);
@@ -248,8 +248,6 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
             if (data?.etagUnmodified) result.unmodified = true;
             return result;
         } catch (err) {
-            delete tile.abortController;
-
             if (tile.aborted || isAbortError(err)) {
                 return;
             }
@@ -257,6 +255,8 @@ export class VectorTileSource extends Evented<SourceEventType> implements Source
                 throw err;
             }
             this._afterTileLoadWorkerResponse(tile, null);
+        } finally {
+            if (tile.abortController === abortController) delete tile.abortController;
         }
     }
 
